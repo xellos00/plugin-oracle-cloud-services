@@ -29,7 +29,8 @@ class CollectorService(BaseService):
 
         self.execute_managers = [
             # set Oracle cloud service manager
-            'AutonomousDatabaseManager'
+            'AutonomousDatabaseManager',
+            #'BareMetalVMDatabaseManager'
         ]
 
     @check_required(['options'])
@@ -73,18 +74,32 @@ class CollectorService(BaseService):
             # Add root compartment which is not part of list_compartments
             for compartment in compartments:
                 if compartment.id == secret_data['tenancy'] or \
-                        compartment.lifecycle_state == Compartment.LIFECYCLE_STATE_ACTIVE:
+                        compartment.lifecycle_state == Compartment.LIFECYCLE_STATE_ACTIVE or \
+                        compartment.name != "ManagedCompartmentForPaaS":
                     result.append(compartment)
             result.append(tenancy)
             return result
         except Exception as e:
             raise RuntimeError("[ERROR: ResourceInfo] Error on identity_read_compartments: " + str(e.args))
 
+    @staticmethod
+    def private_key_content_pretreatment(secret_data):
+        begin = "-----BEGIN RSA PRIVATE KEY-----\n"
+        end = "\n-----END RSA PRIVATE KEY-----"
+        key_content = secret_data.get("key_content")
+
+        return begin + "\n".join(key_content.split(" ")) + end
+
     @classmethod
     def get_regions_and_compartment(cls,secret_data):
         compartments = []
         regions = []
         tenancy = None
+
+        secret_data.update({
+            "key_content": cls.private_key_content_pretreatment(secret_data)
+        })
+
         for default_region in DEFAULT_REGIONS:
             secret_data.update({'region': default_region})
             try:
@@ -129,8 +144,6 @@ class CollectorService(BaseService):
         start_time = time.time()
 
         print("[ EXECUTOR START: Oracle Cloud Service ]")
-        key = params['secret_data']
-        print(key)
         regions, compartments, secret_data = self.get_regions_and_compartment(params['secret_data'])
         multi_thread_params = self._set_multi_thread_params(secret_data, regions, compartments)
 
@@ -150,8 +163,12 @@ class CollectorService(BaseService):
                     future_executors.append(executor.submit(mt_manager.collect_resources, mt_params))
 
             for future in concurrent.futures.as_completed(future_executors):
-                for result in future.result():
-                    yield result.to_primitive()
+                try:
+                    for result in future.result():
+                        yield result.to_primitive()
+                except Exception as e:
+                    print(f"[ERROR INFO] Error in collecting resource: {e}")
+                    pass
 
         # for manager in self.execute_managers:
         #     _manager = self.locator.get_manager(manager)
